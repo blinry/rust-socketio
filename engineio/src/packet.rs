@@ -115,6 +115,16 @@ impl TryFrom<Bytes> for Packet {
             return Err(Error::IncompletePacket());
         }
 
+        let length_end = bytes
+            .iter()
+            .position(|&b| b == b':')
+            .ok_or(Error::IncompletePacket())?;
+
+        // Assume that the rest of the data is the actual packet. The payload has been split
+        // before in the TryFrom<Bytes> implementation. TODO: Is this assumption correct?
+
+        let bytes = bytes.slice(length_end + 1..);
+
         let is_base64 = *bytes.first().ok_or(Error::IncompletePacket())? == b'b';
 
         // only 'messages' packets could be encoded
@@ -144,7 +154,17 @@ impl TryFrom<Bytes> for Packet {
 impl From<Packet> for Bytes {
     /// Encodes a `Packet` into an `u8` byte stream.
     fn from(packet: Packet) -> Self {
-        let mut result = BytesMut::with_capacity(packet.data.len() + 1);
+        let content =
+            String::from_utf8(packet.data.to_vec()).expect("Assuming packet data to be UTF-8");
+        let utf_16_len = content.encode_utf16().count();
+        // Add 1 for the packet_id!
+        let len_string = (utf_16_len + 1).to_string();
+
+        let mut result = BytesMut::with_capacity(len_string.len() + 1 + packet.data.len());
+
+        result.extend(len_string.as_bytes());
+        result.put_u8(b':');
+
         result.put_u8(packet.packet_id.to_string_byte());
         if packet.packet_id == PacketId::MessageBinary {
             result.extend(general_purpose::STANDARD.encode(packet.data).into_bytes());
@@ -171,31 +191,57 @@ impl Payload {
 impl TryFrom<Bytes> for Payload {
     type Error = Error;
     /// Decodes a `payload` which in the `engine.io` context means a chain of normal
-    /// packets separated by a certain SEPARATOR, in this case the delimiter `\x30`.
+    /// packets, which start with their length in UTF-16 code units, and a colon.
     fn try_from(payload: Bytes) -> Result<Self> {
-        payload
-            .split(|&c| c as char == Self::SEPARATOR)
-            .map(|slice| Packet::try_from(payload.slice_ref(slice)))
-            .collect::<Result<Vec<_>>>()
-            .map(Self)
+        let mut packets = Vec::new();
+
+        let payload_str = std::str::from_utf8(&payload).or_else(|e| Err(Error::InvalidUtf8(e)))?;
+
+        let mut buffer = vec![];
+        let mut remaining_codeunits = 0;
+        let mut reading_length = true;
+
+        for codeunit in payload_str.encode_utf16() {
+            if reading_length {
+                if codeunit == ':' as u16 {
+                    let string =
+                        String::from_utf16(&buffer).or_else(|e| Err(Error::InvalidPacket()))?;
+                    remaining_codeunits = match string.parse() {
+                        Ok(value) => value,
+                        Err(_) => {
+                            return Err(Error::InvalidPacket());
+                        }
+                    };
+                    reading_length = false;
+                }
+                buffer.push(codeunit);
+            } else {
+                buffer.push(codeunit);
+                remaining_codeunits -= 1;
+                if remaining_codeunits == 0 {
+                    let string =
+                        String::from_utf16(&buffer).or_else(|e| Err(Error::InvalidPacket()))?;
+                    buffer = vec![];
+                    let packet = Packet::try_from(Bytes::from(string))?;
+                    packets.push(packet);
+                    reading_length = true;
+                }
+            }
+        }
+        Ok(Payload(packets))
     }
 }
 
 impl TryFrom<Payload> for Bytes {
     type Error = Error;
     /// Encodes a payload. Payload in the `engine.io` context means a chain of
-    /// normal `packets` separated by a SEPARATOR, in this case the delimiter
-    /// `\x30`.
+    /// normal `packets`.
     fn try_from(packets: Payload) -> Result<Self> {
         let mut buf = BytesMut::new();
         for packet in packets {
             // at the moment no base64 encoding is used
             buf.extend(Bytes::from(packet.clone()));
-            buf.put_u8(Payload::SEPARATOR as u8);
         }
-
-        // remove the last separator
-        let _ = buf.split_off(buf.len() - 1);
         Ok(buf.freeze())
     }
 }
