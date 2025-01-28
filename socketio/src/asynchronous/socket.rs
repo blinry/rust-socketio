@@ -61,6 +61,12 @@ impl Socket {
         Ok(())
     }
 
+    pub async fn ping(&self) -> Result<()> {
+        let engine_packet = EnginePacket::new(EnginePacketId::Ping, Bytes::new());
+        self.engine_client.emit(engine_packet).await?;
+        Ok(())
+    }
+
     /// Sends a `socket.io` packet to the server using the `engine.io` client.
     pub async fn send(&self, packet: Packet) -> Result<()> {
         if !self.is_engineio_connected() || !self.connected.load(Ordering::Acquire) {

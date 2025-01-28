@@ -171,10 +171,30 @@ impl Client {
         tokio::runtime::Handle::current().spawn(async move {
             loop {
                 let mut stream = client_clone.as_stream().await;
-                // Consume the stream until it returns None and the stream is closed.
-                while let Some(item) = stream.next().await {
-                    if let Err(e) = item {
-                        trace!("Network error occurred: {}", e);
+                let mut cont = true;
+                while cont {
+                    tokio::select! {
+                        res = stream.next() => {
+                            match res {
+                                Some(item) => {
+                                    if let Err(e) = item {
+                                        trace!("Network error occurred: {}", e);
+                                    }
+                                }
+                                _ => {
+                                    cont = false;
+                                }
+                            }
+                        }
+                        // Upon timeout, send a ping.
+                        // TODO: This should be implemented in the engineio library, but this was
+                        // easier.
+                        // TODO: This should respect the actual ping interval, instead of always 5 s.
+                        _ = tokio::time::sleep(Duration::from_secs(5)) => {
+                            if let Err(e) = client_clone.socket.read().await.ping().await {
+                                error!("Error while sending ping: {e}");
+                            }
+                        }
                     }
                 }
 

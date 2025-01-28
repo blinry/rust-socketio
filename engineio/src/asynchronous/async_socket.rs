@@ -10,7 +10,11 @@ use std::{
 use async_stream::try_stream;
 use bytes::Bytes;
 use futures_util::{stream, Stream, StreamExt};
-use tokio::{runtime::Handle, sync::Mutex, time::Instant};
+use tokio::{
+    runtime::Handle,
+    sync::Mutex,
+    time::{Duration, Instant},
+};
 
 use crate::{
     asynchronous::{callback::OptionalCallback, transport::AsyncTransportType},
@@ -65,8 +69,7 @@ impl Socket {
         }
     }
 
-    /// Opens the connection to a specified server. The first Pong packet is sent
-    /// to the server to trigger the Ping-cycle.
+    /// Opens the connection to a specified server.
     pub async fn connect(&self) -> Result<()> {
         // SAFETY: Has valid handshake due to type
         self.connected.store(true, Ordering::Release);
@@ -77,10 +80,7 @@ impl Socket {
         }
 
         // set the last ping to now and set the connected state
-        *self.last_ping.lock().await = Instant::now();
-
-        // emit a pong packet to keep trigger the ping cycle on the server
-        self.emit(Packet::new(PacketId::Pong, Bytes::new())).await?;
+        //*self.last_ping.lock().await = Instant::now();
 
         Ok(())
     }
@@ -102,14 +102,13 @@ impl Socket {
             PacketId::Upgrade => {
                 // this is already checked during the handshake, so just do nothing here
             }
-            PacketId::Ping => {
-                self.pinged().await;
-                self.emit(Packet::new(PacketId::Pong, Bytes::new())).await?;
-            }
-            PacketId::Pong | PacketId::Open => {
-                // this will never happen as the pong and open
+            PacketId::Ping | PacketId::Open => {
+                // this will never happen as the ping and open
                 // packets are only sent by the client
                 return Err(Error::InvalidPacket());
+            }
+            PacketId::Pong => {
+                // this happens when the server pongs our ping
             }
             PacketId::Noop => (),
         }
@@ -251,9 +250,9 @@ impl Socket {
         stream::unfold(
             Self::stream(self.transport_raw.clone()),
             |mut stream| async {
-                // Wait for the next payload or until we should have received the next ping.
+                // Wait for the next payload; hack to not time out.
                 match tokio::time::timeout(
-                    std::time::Duration::from_millis(self.time_to_next_ping().await),
+                    std::time::Duration::from_millis(u64::MAX),
                     stream.next(),
                 )
                 .await
