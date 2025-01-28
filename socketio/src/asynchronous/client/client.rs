@@ -113,12 +113,6 @@ impl Client {
         // Connect the underlying socket
         self.socket.read().await.connect().await?;
 
-        // construct the opening packet
-        let auth = self.auth.as_ref().map(|data| data.to_string());
-        let open_packet = Packet::new(PacketId::Connect, self.nsp.clone(), auth, None, 0, None);
-
-        self.socket.read().await.send(open_packet).await?;
-
         Ok(())
     }
 
@@ -341,10 +335,6 @@ impl Client {
     pub async fn disconnect(&self) -> Result<()> {
         *(self.disconnect_reason.write().await) = DisconnectReason::Manual;
 
-        let disconnect_packet =
-            Packet::new(PacketId::Disconnect, self.nsp.clone(), None, None, 0, None);
-
-        self.socket.read().await.send(disconnect_packet).await?;
         self.socket.read().await.disconnect().await?;
 
         Ok(())
